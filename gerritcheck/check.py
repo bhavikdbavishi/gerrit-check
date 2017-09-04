@@ -11,57 +11,55 @@
 # on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
 # express or implied. See the License for the specific language governing
 # permissions and limitations under the License.
-from __future__ import absolute_import, print_function
 
-from collections import defaultdict
-from plumbum import local, SshMachine
-from flake8.engine import get_style_guide
-
-# Subprocess is used to address https://github.com/tomerfiliba/plumbum/issues/295
-from subprocess import Popen, PIPE
 import argparse
-try:
-    from exceptions import RuntimeError
-except:
-    # In Python3 all exceptions are built-in
-    pass
 import json
-import multiprocessing
 import os
 import sys
+from collections import defaultdict
+# Subprocess is used to address
+# https://github.com/tomerfiliba/plumbum/issues/295
+from subprocess import Popen, PIPE
 
+from plumbum import local
 
-
-CPP_HEADER_FILES = (".h", ".hpp")
-CPP_SOURCE_FILES = (".c", ".cc", ".cpp")
-CPP_FILES = CPP_HEADER_FILES + CPP_SOURCE_FILES
-
-# Default cpplint options that are passed on during the execution
-DEFAULT_CPPLINT_FILTER_OPTIONS=("-legal/copyright", "-build/include_order")
+PY_FILES = (".py",)
 
 # Prepare global git cmd
 git = local["git"]
 
-class GerritCheckExecption(RuntimeError):
+# commands
+cmd_pylint = [
+    'pylint',
+    '-rn',
+    '--disable=C0103',
+    '--msg-template="{path}@@{line}@@"[PYLINT] [{msg_id}] ({symbol}) {msg}" ']
+cmd_flake8 = [
+    'flake8',
+    '--format=%(path)s@@%(row)d@@[FLAKE8] [%(code)s] %(text)s']
+
+
+class GerritCheckException(RuntimeError):
     pass
 
-def extract_files_for_commit(rev):
+
+def extract_files_for_commit(rev, branch):
     """
     :return: A list of files that where modified in revision 'rev'
     """
-    diff = Popen(["git", "diff-tree", "--no-commit-id", "--name-only", "-r", str(rev)],
-            stdout=PIPE)
+    diff = Popen(["git", "diff-tree", "--no-commit-id", "--name-only", "-r",
+                  "..".join([rev, branch])], stdout=PIPE, universal_newlines=True)
 
     out, err = diff.communicate()
 
     if err:
-        raise GerritCheckExecption("Could not run diff on current revision. "
+        raise GerritCheckException("Could not run diff on current revision. "
                                    "Make sure that the current revision has a "
-                                   "parent:" + err)
+                                   "parent: %s" % err)
     return [f.strip() for f in out.splitlines() if len(f)]
 
 
-def filter_files(files, suffix=CPP_FILES):
+def filter_files(files, suffix=PY_FILES):
     result = []
     for f in files:
         if f.endswith(suffix) and os.path.exists(f):
@@ -76,115 +74,60 @@ def line_part_of_commit(file, line, commit):
     return line_val.split(" ", 1)[0] == commit
 
 
-def flake8_on_files(files, commit):
+def run_cmd(check_cmd):
+    cmd = Popen(check_cmd, cwd=os.getcwd(), shell=False,
+                stdout=PIPE, universal_newlines=True)
+
+    out, err = cmd.communicate()
+
+    if err:
+        raise GerritCheckException(
+            "Could not run '%s' in current directory. %s" %
+            (check_cmd, err))
+    return [f.strip() for f in out.splitlines() if len(f)]
+
+
+def py_checks_on_files(files, commit):
     """ Runs flake8 on the files to report style guide violations.
     """
-    style = get_style_guide(config_file=None, quiet=False)
 
     # We need to redirect stdout while generating the JSON to avoid spilling
     # messages to the user.
     old_stdout = sys.stdout
     sys.stdout = open("/dev/null", "w")
     review = {}
-    for file in filter_files(files, (".py", )):
-        report = style.check_files((file, ))
-        if report.total_errors:
-            if not "comments" in review:
-                review["comments"] = defaultdict(list)
-            for line_number, offset, code, text, doc in report._deferred_print:
-                if not line_part_of_commit(file, line_number, commit): continue
-                review["comments"][file].append({
-                "path": file,
-                "line": line_number,
-                "message": "[{0}] {1}".format(code, text)
-            })
-    if "comments" in review and len(review["comments"]):
-        review["message"] = "[FLAKE8] Some issues found."
-    else:
-        review["message"] = "[FLAKE8] No issues found. OK"
-    sys.stdout = old_stdout
-    return json.dumps(review)
+    reference = {}
+    report = []
+    report.extend(run_cmd(cmd_flake8 + files))
+    report.extend(run_cmd(cmd_pylint + files))
 
-
-def cppcheck_on_files(files, commit):
-    """ Runs cppcheck on a list of input files changed in `commit` and
-    returns a JSON structure in the format required for Gerrit
-    to submit a review.
-    """
-    cppcheck_cmd = local["cppcheck"][
-        "--quiet",
-        "-j %d" % (multiprocessing.cpu_count() * 2),
-        "--template={file}###{line}###{severity}###{message}"]
-
-    # Each line in the output is an issue
-    review = {}
-    _, _, err = cppcheck_cmd.run(filter_files(files, CPP_SOURCE_FILES),
-                                 retcode=None)
-    if len(err) > 0:
-        review["message"] = "[CPPCHECK] Some issues need to be fixed."
-
-        review["comments"] = defaultdict(list)
-        for c in err.split("\n"):
-            if len(c.strip()) == 0: continue
-
-            parts = c.split("###")
-
-            # Only add a comment if code was changed in the modified region
-            if not line_part_of_commit(parts[0], parts[1], commit): continue
-
-            review["comments"][parts[0]].append({
-                "path": parts[0],
-                "line": parts[1],
-                "message": "[{0}] {1}".format(parts[2], parts[3])
-            })
-
-        if len(review["comments"]):
-            review["labels"] = {"Code-Review": -1}
-            return json.dumps(review)
-
-    # Add a review comment that no issues have been found
-    review["message"] = "[CPPCHECK] No issues found. OK"
-    return json.dumps(review)
-
-
-def cpplint_on_files(files, commit, filters=DEFAULT_CPPLINT_FILTER_OPTIONS):
-    """  Runs cpplint on a list of input files changed in `commit` and
-    returns a JSON structure in the format required for Gerrit
-    to submit a review.
-    """
-    cpplint_cmd = local["cpplint"]["--filter={0}".format(",".join(filters))]
-
-    # Each line in the output is an issue
-    review = {}
-    _, _, err = cpplint_cmd.run(filter(os.path.exists, files), retcode=None)
-    if len(err) > 0 and len(files):
-        review["message"] = "[CPPLINT] Some issues need to be fixed."
-        review["comments"] = defaultdict(list)
-        for c in err.split("\n"):
-            if len(c.strip()) == 0 or c.strip().startswith("Done") or \
-                    c.strip().startswith("Total") or \
-                    c.strip().startswith("Ignoring"): continue
-
-            # cpplint cannot be configured to output a custom format so we
-            # rely on knowing that the individual components are
-            # two-space separated.
-            location, rest = c.split("  ", 1)
-            message, category = rest.rsplit("  ", 1)
-            file, line, _ = location.split(":", 2)
-
-            # Only add a comment if code was changed in the modified region
-            if not line_part_of_commit(file, line, commit): continue
+    for file in filter_files(files, (".py",)):
+        review.setdefault('comments', defaultdict(list))
+        for line in report:
+            if '@@' not in line:
+                continue
+            file_name, line_number, text = line.split('@@')
+            if file != file_name:
+                continue
+            # if not line_part_of_commit(file, line_number, commit): continue
+            message = " " + text.strip('"')
+            try:
+                message = reference['comments'][file][
+                    line_number] + "\n " + message
+            except KeyError:
+                message = message
+            reference.setdefault('comments', {}).setdefault(
+                file, {}).update({line_number: message})
             review["comments"][file].append({
                 "path": file,
-                "line": line,
-                "message": "[{0}] {1}".format(category, message)
+                "line": line_number,
+                "message": message
             })
-        if len(review["comments"]):
-            review["labels"] = {"Code-Review": -1}
-            return json.dumps(review)
-
-    # Add a review comment that no issues have been found
-    review["message"] = "[CPPLINT] No issues found. OK"
+    if "comments" in review and len(review["comments"]):
+        review["message"] = "[CHECKS] Some issues found."
+    else:
+        review["message"] = "[CHECKS] No issues found. OK"
+    sys.stdout = old_stdout
     return json.dumps(review)
 
 
@@ -194,19 +137,17 @@ def submit_review(change, user, host, data, port=22):
     (local["cat"] << data | remote["gerrit", "review", change, "--json"])()
 
 
-
 # Mapping a particular checking function to a tool name
 CHECKER_MAPPING = {
-    "cppcheck": cppcheck_on_files,
-    "cpplint": cpplint_on_files,
-    "flake8": flake8_on_files
+    "flake8": py_checks_on_files
 }
+
 
 def main():
     parser = argparse.ArgumentParser(
-            description=("Execute code analysis and report results locally "
-                         "or to gerrit"),
-            formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+        description=("Execute code analysis and report results locally "
+                     "or to gerrit"),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     parser.add_argument("-g", "--gerrit-host", help="Gerrit host")
     parser.add_argument("-u", "--user", help="Username", default="jenkins")
@@ -221,29 +162,22 @@ def main():
     parser.add_argument("-l", "--local", action="store_true", default=False,
                         help=("Display output locally instead "
                               "of submitting it to Gerrit"))
+    parser.add_argument("-b", "--branch_name",
+                        required=True, help="Branch Name")
 
     args = parser.parse_args()
 
-    # If commit is set to HEAD, no need to backup the previous revision
-    if args.commit != "HEAD":
-        hash_before = local["git"]("rev-parse", "HEAD").strip()
-        local["git"]("checkout", args.commit)
+    modified_files = extract_files_for_commit(args.commit, args.branch_name)
 
-    modified_files = extract_files_for_commit(args.commit)
-
-    current_hash = local["git"]("rev-parse", args.commit).strip()
+    current_hash = git("rev-parse", args.commit).strip()
     for t in args.tool:
         result = CHECKER_MAPPING[t](modified_files, current_hash)
         if args.local:
-            print (json.dumps(json.loads(result)))
+            print(json.dumps(json.loads(result)))
         else:
             submit_review(args.commit, args.user,
                           args.gerrit_host, result, args.port)
 
-    # Only need to revert to previous change if the commit is
-    # different from HEAD
-    if args.commit != "HEAD":
-        git("checkout", hash_before)
 
 if __name__ == "__main__":
     main()
