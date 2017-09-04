@@ -110,10 +110,10 @@ def py_checks_on_files(files, commit):
             if file != file_name:
                 continue
             # if not line_part_of_commit(file, line_number, commit): continue
-            message = " " + text.strip('"')
+            message = text.strip('"')
             try:
                 message = reference['comments'][file][
-                    line_number] + "\n " + message
+                    line_number] + "\n" + message
             except KeyError:
                 message = message
             reference.setdefault('comments', {}).setdefault(
