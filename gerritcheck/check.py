@@ -50,7 +50,7 @@ def extract_files_for_commit(rev):
     :return: A list of files that where modified in revision 'rev'
     """
     diff = Popen(["git", "diff-tree", "--no-commit-id", "--name-only", "-r", str(rev)],
-            stdout=PIPE)
+            stdout=PIPE, universal_newlines=True)
 
     out, err = diff.communicate()
 
