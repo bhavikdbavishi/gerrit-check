@@ -102,7 +102,6 @@ def py_checks_on_files(files, commit):
     report.extend(run_cmd(cmd_pylint + files))
 
     for file in filter_files(files, (".py",)):
-        review.setdefault('comments', defaultdict(list))
         for line in report:
             if '@@' not in line:
                 continue
@@ -111,18 +110,19 @@ def py_checks_on_files(files, commit):
                 continue
             # if not line_part_of_commit(file, line_number, commit): continue
             message = text.strip('"')
-            try:
-                message = reference['comments'][file][
-                    line_number] + "\n" + message
-            except KeyError:
-                message = message
-            reference.setdefault('comments', {}).setdefault(
-                file, {}).update({line_number: message})
-            review["comments"][file].append({
-                "path": file,
-                "line": line_number,
-                "message": message
-            })
+            reference.setdefault(file, {})\
+                .setdefault(line_number, set())\
+                .add(message)
+
+    for file_name in reference:
+        for line_no in reference[file_name]:
+            review.setdefault('comments', {})\
+                .setdefault(file_name, [])\
+                .append({
+                    "path": file_name,
+                    "line": line_no,
+                    "message": "\n".join(reference[file_name][line_no])
+                })
     if "comments" in review and len(review["comments"]):
         review["message"] = "[CHECKS] Some issues found."
     else:
