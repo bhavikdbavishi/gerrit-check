@@ -42,13 +42,12 @@ cmd_flake8 = [
 class GerritCheckException(RuntimeError):
     pass
 
-
-def extract_files_for_commit(rev, branch):
+def extract_files_for_commit(rev):
     """
     :return: A list of files that where modified in revision 'rev'
     """
-    diff = Popen(["git", "diff-tree", "--no-commit-id", "--name-only", "-r",
-                  "..".join([rev, branch])], stdout=PIPE, universal_newlines=True)
+    diff = Popen(["git", "diff-tree", "--no-commit-id", "--name-only", "-r", str(rev)],
+            stdout=PIPE)
 
     out, err = diff.communicate()
 
@@ -56,14 +55,15 @@ def extract_files_for_commit(rev, branch):
         raise GerritCheckException("Could not run diff on current revision. "
                                    "Make sure that the current revision has a "
                                    "parent: %s" % err)
-    return [f.strip() for f in out.splitlines() if len(f)]
+    return [f.strip().decode("utf-8") for f in out.splitlines() if len(f)]
 
 
 def filter_files(files, suffix=PY_FILES):
     result = []
     for f in files:
-        if f.endswith(suffix) and os.path.exists(f):
-            result.append(f)
+        file_name = "%s" % f
+        if file_name.endswith(suffix) and os.path.exists(file_name):
+            result.append(file_name)
     return result
 
 
@@ -108,7 +108,7 @@ def py_checks_on_files(files, commit):
             file_name, line_number, text = line.split('@@')
             if file != file_name:
                 continue
-            # if not line_part_of_commit(file, line_number, commit): continue
+            if not line_part_of_commit(file, line_number, commit): continue
             message = text.strip('"')
             reference.setdefault(file, {})\
                 .setdefault(line_number, set())\
@@ -162,22 +162,29 @@ def main():
     parser.add_argument("-l", "--local", action="store_true", default=False,
                         help=("Display output locally instead "
                               "of submitting it to Gerrit"))
-    parser.add_argument("-b", "--branch_name",
-                        required=True, help="Branch Name")
 
     args = parser.parse_args()
 
-    modified_files = extract_files_for_commit(args.commit, args.branch_name)
+    # If commit is set to HEAD, no need to backup the previous revision
+    if args.commit != "HEAD":
+        hash_before = local["git"]("rev-parse", "HEAD").strip()
+        local["git"]("checkout", args.commit)
 
-    current_hash = git("rev-parse", args.commit).strip()
+    modified_files = extract_files_for_commit(args.commit)
+
+    current_hash = local["git"]("rev-parse", args.commit).strip()
     for t in args.tool:
         result = CHECKER_MAPPING[t](modified_files, current_hash)
         if args.local:
-            print(json.dumps(json.loads(result)))
+            print(result)
         else:
             submit_review(args.commit, args.user,
                           args.gerrit_host, result, args.port)
 
+    # Only need to revert to previous change if the commit is
+    # different from HEAD
+    if args.commit != "HEAD":
+        git("checkout", hash_before)
 
 if __name__ == "__main__":
     main()
