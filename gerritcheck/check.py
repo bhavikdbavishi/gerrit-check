@@ -34,9 +34,6 @@ cmd_pylint = [
     '-rn',
     '--disable=C0103',
     '--msg-template="{path}@@{line}@@"[PYLINT] [{msg_id}] ({symbol}) {msg}" ']
-cmd_flake8 = [
-    'flake8',
-    '--format=%(path)s@@%(row)d@@[FLAKE8] [%(code)s] %(text)s']
 
 
 class GerritCheckException(RuntimeError):
@@ -88,7 +85,7 @@ def run_cmd(check_cmd):
 
 
 def py_checks_on_files(files, commit):
-    """ Runs flake8 on the files to report style guide violations.
+    """ Runs Pylint on the files to report style guide violations.
     """
 
     # We need to redirect stdout while generating the JSON to avoid spilling
@@ -98,7 +95,6 @@ def py_checks_on_files(files, commit):
     review = {}
     reference = {}
     report = []
-    report.extend(run_cmd(cmd_flake8 + files))
     report.extend(run_cmd(cmd_pylint + files))
 
     for file in filter_files(files, (".py",)):
@@ -139,7 +135,7 @@ def submit_review(change, user, host, data, port=22):
 
 # Mapping a particular checking function to a tool name
 CHECKER_MAPPING = {
-    "flake8": py_checks_on_files
+    "pylint": py_checks_on_files
 }
 
 
